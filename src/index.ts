@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync, watch } from "fs";
+import { readFileSync, writeFileSync, statSync, watch } from "fs";
 import { readFile } from "fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { createRequire } from "module";
@@ -33,6 +33,12 @@ import {
   type TransitionName,
 } from "./presentation-options.js";
 import { lintMarkdown, type LintIssue } from "./lint.js";
+import {
+  DEFAULT_ARTICLE_DESIGN,
+  articleDesignListing,
+  findArticleDesign,
+  renderArticle,
+} from "./article.js";
 
 const moduleRequire = createRequire(import.meta.url);
 
@@ -467,6 +473,39 @@ async function handleEditorRoute(
       const detail = err instanceof PdfError ? err.message : "rendering failed";
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "render failed", detail }));
+    }
+    return true;
+  }
+
+  if (
+    (pathname === "/__article" || pathname === "/__present-article") &&
+    req.method === "POST"
+  ) {
+    const body = JSON.parse(await readBody(req)) as {
+      markdown?: string;
+      design?: string;
+      title?: string;
+      /** "cdn" for a page the editor downloads; anything else stays local. */
+      assets?: string;
+    };
+    const markdown = body.markdown ?? "";
+    if (pathname === "/__present-article" && !markdown.trim()) {
+      res.writeHead(422, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "empty document" }));
+      return true;
+    }
+    // Pages this server shows itself load KaTeX and Mermaid from /__vendor,
+    // so the preview, present, and PDF work offline, like a deck does.
+    const article = renderArticle(markdown, {
+      design: body.design,
+      fallbackTitle: body.title,
+      assets: pathname === "/__article" && body.assets === "cdn" ? "cdn" : "local",
+    });
+    if (pathname === "/__article") {
+      sendJson(res, article);
+    } else {
+      // Served from the root like a deck, so relative images still resolve.
+      sendJson(res, { path: stashDeck(article.html), title: article.title });
     }
     return true;
   }
@@ -1002,6 +1041,136 @@ program
 
       // Keep the process alive until interrupted.
       await new Promise<void>(() => {});
+    }
+  );
+
+/**
+ * Inlines local images referenced by a converted article as data URIs, so
+ * the page stays one file. Remote and data: sources are left alone, and a
+ * file that cannot be read keeps its path with a warning.
+ */
+function inlineLocalImages(baseDir: string): (src: string) => string | null {
+  const warned = new Set<string>();
+  const warn = (src: string, why: string) => {
+    if (warned.has(src)) return;
+    warned.add(src);
+    console.error(`${c.yellow}deckrun convert: ${why} '${src}', kept as a path${c.reset}`);
+  };
+  return (src) => {
+    // A URL scheme needs two letters or more, so a Windows drive (C:) is a path.
+    if (/^[a-z][a-z0-9+.-]+:/i.test(src) || src.startsWith("//") || src.startsWith("#")) {
+      return null;
+    }
+    let path = src.split(/[?#]/)[0];
+    try {
+      path = decodeURIComponent(path);
+    } catch {
+      // Keep the raw path; a malformed escape is still worth one try on disk.
+    }
+    if (!getMime(path).startsWith("image/")) {
+      warn(src, "not an image type:");
+      return null;
+    }
+    // "/img/x.png" means the Markdown's folder, as it does in the editor,
+    // which serves that folder as its root. A real absolute path still works.
+    const candidates = /^[\\/]/.test(path)
+      ? [resolve(baseDir, path.replace(/^[\\/]+/, "")), path]
+      : [resolve(baseDir, path)];
+    for (const target of candidates) {
+      try {
+        return `data:${getMime(target)};base64,${readFileSync(target).toString("base64")}`;
+      } catch {
+        // Try the next reading of the path.
+      }
+    }
+    warn(src, "cannot read image");
+    return null;
+  };
+}
+
+/** True when both paths name one file, through symlinks, hard links, or case. */
+function sameFile(a: string, b: string): boolean {
+  try {
+    const x = statSync(a);
+    const y = statSync(b);
+    return x.dev === y.dev && x.ino === y.ino;
+  } catch {
+    return false;
+  }
+}
+
+program
+  .command("convert")
+  .description("Convert a Markdown file into one self-contained HTML page in a reading design")
+  .argument("[file]", "Markdown file to convert; use - to read standard input")
+  .option("-d, --design <name>", "Page design: dark, plain, or crimson", DEFAULT_ARTICLE_DESIGN)
+  .option("-o, --out <path>", "Where to write the page; - writes to standard output")
+  .option("--list-designs", "Print every design and exit")
+  .action(
+    (file: string | undefined, opts: { design: string; out?: string; listDesigns?: boolean }) => {
+      if (opts.listDesigns) {
+        for (const line of articleDesignListing()) console.log(line);
+        return;
+      }
+      if (!file) {
+        console.error("deckrun convert: pass a Markdown file, or - to read standard input.");
+        process.exitCode = 2;
+        return;
+      }
+      const design = findArticleDesign(opts.design);
+      if (!design) {
+        console.error(
+          `deckrun convert: unknown design '${opts.design}'. Run deckrun convert --list-designs to see them all.`
+        );
+        process.exitCode = 1;
+        return;
+      }
+
+      const fromStdin = file === "-";
+      const absIn = fromStdin ? null : resolve(process.cwd(), file);
+      let markdown: string;
+      try {
+        markdown = absIn ? readFileSync(absIn, "utf-8") : readFileSync(0, "utf-8");
+      } catch {
+        console.error(`deckrun convert: cannot read file '${file}'`);
+        process.exitCode = 1;
+        return;
+      }
+
+      const toStdout = opts.out === "-" || (fromStdin && !opts.out);
+      let absOut: string | null = null;
+      if (!toStdout) {
+        absOut = opts.out
+          ? resolve(process.cwd(), opts.out)
+          : absIn!.replace(/\.(md|markdown|txt)$/i, "") + ".html";
+        if (absOut === absIn || sameFile(absOut, absIn!)) {
+          console.error("deckrun convert: the output would overwrite the input. Pass -o to choose another path.");
+          process.exitCode = 1;
+          return;
+        }
+      }
+
+      const baseDir = absIn ? dirname(absIn) : process.cwd();
+      const fallbackTitle = absIn ? basename(absIn).replace(/\.(md|markdown|txt)$/i, "") : "Untitled";
+      const article = renderArticle(markdown, {
+        design,
+        fallbackTitle,
+        resolveImage: inlineLocalImages(baseDir),
+      });
+
+      if (toStdout) {
+        process.stdout.write(article.html);
+        return;
+      }
+      try {
+        writeFileSync(absOut!, article.html, "utf-8");
+      } catch {
+        console.error(`deckrun convert: cannot write '${opts.out ?? absOut}'`);
+        process.exitCode = 1;
+        return;
+      }
+      const shown = relative(process.cwd(), absOut!) || absOut!;
+      console.log(`${c.green}✓${c.reset} ${file} ${c.dim}→${c.reset} ${shown} ${c.dim}(${design})${c.reset}`);
     }
   );
 

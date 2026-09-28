@@ -27,6 +27,11 @@ import {
   type TransitionName,
 } from "./presentation-options.js";
 import { HIGHLIGHT_RUNTIME } from "./highlights.js";
+import {
+  DEFAULT_ARTICLE_DESIGN,
+  WELCOME_ARTICLE,
+  articleDesignSummaries,
+} from "./article.js";
 
 /** A document the editor is backed by: a local file or a fetched URL. */
 export interface EditorFileInfo {
@@ -62,6 +67,9 @@ function bootstrapJson(
     snippets: SNIPPETS,
     tips: TIPS,
     welcome: WELCOME_DECK,
+    design: DEFAULT_ARTICLE_DESIGN,
+    designs: articleDesignSummaries(),
+    welcomeArticle: WELCOME_ARTICLE,
   };
   // Keep the JSON inert inside a <script> block.
   return JSON.stringify(payload).replace(/</g, "\\u003c");
@@ -1042,6 +1050,34 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   display: none !important;
 }
 
+/* ── Markdown article ─────────────────────────────────────────────────────
+   Markdown on the left, as for a deck, but the right pane is the rendered
+   page rather than a slide stage, so it borrows the HTML doc's iframe. */
+[data-doc-kind="article"] #nudge,
+[data-doc-kind="article"] #prev-head,
+[data-doc-kind="article"] #stage,
+[data-doc-kind="article"] #notes,
+[data-doc-kind="article"] #btn-guide,
+[data-doc-kind="article"] #btn-palette,
+[data-doc-kind="article"] #template-wrap,
+[data-doc-kind="article"] #btn-theme,
+[data-doc-kind="article"] #font-wrap {
+  display: none !important;
+}
+
+[data-doc-kind="article"] #frame-html { display: block; }
+
+#design-wrap { display: none; }
+[data-doc-kind="article"] #design-wrap { display: inline-flex; }
+
+.design-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  border: 1px solid var(--surface1);
+}
+
 /* ── Start screen ─────────────────────────────────────────────────────── */
 #screen-start { position: fixed; inset: 0; z-index: 55; display: none; }
 #screen-start.is-on { display: block; }
@@ -1049,7 +1085,9 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 #start-box {
   position: relative;
   width: min(680px, 92vw);
-  margin: 12vh auto 0;
+  margin: 8vh auto 0;
+  max-height: 88vh;
+  overflow-y: auto;
   padding: 26px 28px 22px;
   background: var(--mantle);
   border: 1px solid var(--surface1);
@@ -1149,7 +1187,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
     <span id="topbar-right">
     <button class="btn" id="btn-guide" title="Everything you can put on a slide">guide <kbd>Cmd /</kbd></button>
     <button class="btn" id="btn-palette" title="Insert anything">insert <kbd>Cmd K</kbd></button>
-    <button class="btn" id="btn-new" title="Start a new Markdown deck or HTML doc">new</button>
+    <button class="btn" id="btn-new" title="Start a new Markdown deck, HTML page, or HTML doc">new</button>
     <span class="menu">
       <button class="btn" id="btn-export" aria-haspopup="true" aria-expanded="false">export <span class="menu__chev">&#9662;</span></button>
       <div class="menu__pop" id="export-menu">
@@ -1190,7 +1228,19 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
       <span id="theme-label">theme</span>
       <kbd>Cmd Shift L</kbd>
     </button>
-    <span class="menu">
+    <span class="menu" id="design-wrap">
+      <button class="btn" id="btn-design" aria-haspopup="true" aria-expanded="false" title="The page's design">
+        <span class="design-dot" id="design-dot"></span>
+        <span id="design-label">design</span> <span class="menu__chev">&#9662;</span>
+      </button>
+      <div class="menu__pop menu__pop--template" id="design-menu">
+        <div class="menu-section">
+          <div class="menu-section__title">page design</div>
+          <div id="design-list"></div>
+        </div>
+      </div>
+    </span>
+    <span class="menu" id="font-wrap">
       <button class="btn" id="btn-font" aria-haspopup="true" aria-expanded="false" title="Heading and body faces">
         <span id="font-label">font</span> <span class="menu__chev">&#9662;</span>
       </button>
@@ -1344,6 +1394,20 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
           </div>
         </div>
       </div>
+      <div class="start-card" id="start-article-card">
+        <span class="start-card__title">Markdown &rarr; HTML page</span>
+        <span class="start-card__desc">Paste or upload a .md file and get one self-contained page to read or share &mdash; no slides.</span>
+        <span class="start-card__acts">
+          <button id="start-article-blank">start blank</button>
+          <button id="start-article-upload">upload .md</button>
+        </span>
+        <div class="start-options">
+          <div class="start-options__row">
+            <span class="start-options__label">design</span>
+            <span class="start-options__choices" id="start-design-list"></span>
+          </div>
+        </div>
+      </div>
       <div class="start-card" id="start-html-card">
         <span class="start-card__title">HTML document</span>
         <span class="start-card__desc">One self-contained page, presented with the laser, pen, and canvas &mdash; no slide boundaries.</span>
@@ -1393,6 +1457,7 @@ ${HIGHLIGHT_RUNTIME}
     body:    'deckrun.font.body.v1',
     template:'deckrun.template.v1',
     transition:'deckrun.transition.v1',
+    design:  'deckrun.design.v1',
     split:   'deckrun.split.v1',
     mode:    'deckrun.mode.v1',
     nudge:   'deckrun.nudges.v1',
@@ -1477,7 +1542,7 @@ ${HIGHLIGHT_RUNTIME}
   }
 
   /** Returns the new deck's id, or null if this browser refused to store it. */
-  function createDeck(name, content, kind, template, transition) {
+  function createDeck(name, content, kind, template, transition, design) {
     var id = newDeckId();
     if (!lsSet(K.deck + id, content)) return null;
     var list = loadIndex();
@@ -1489,6 +1554,7 @@ ${HIGHLIGHT_RUNTIME}
       chars: content.length,
       template: template || (typeof state !== 'undefined' && state.template ? state.template : D.template),
       transition: transition || (typeof state !== 'undefined' && state.transition ? state.transition : D.transition),
+      design: design || (typeof state !== 'undefined' && state.design ? state.design : D.design),
       at: Date.now()
     });
     if (!saveIndex(list)) { lsDel(K.deck + id); return null; }
@@ -1536,6 +1602,7 @@ ${HIGHLIGHT_RUNTIME}
         list[i].kind = state.kind;
         list[i].template = state.template;
         list[i].transition = state.transition;
+        list[i].design = state.design;
         if (state.kind === 'html') {
           list[i].slides = 0;
           list[i].chars = srcHtml.value.length;
@@ -1564,7 +1631,14 @@ ${HIGHLIGHT_RUNTIME}
     var mdHint = document.querySelector('#export-menu [data-export="md"] .menu__hint');
     var htmlName = document.querySelector('#export-menu [data-export="html"] .menu__name');
     var htmlHint = document.querySelector('#export-menu [data-export="html"] .menu__hint');
-    if (state.kind === 'html') {
+    var pdfHint = document.querySelector('#export-menu [data-export="pdf"] .menu__hint');
+    pdfHint.textContent = state.kind === 'markdown' ? '16:9 pages, styling intact' : 'the page, styling intact';
+    if (state.kind === 'article') {
+      mdName.textContent = 'Markdown';
+      mdHint.textContent = 'a plain .md file';
+      htmlName.textContent = 'HTML page';
+      htmlHint.textContent = 'one self-contained file, in this design';
+    } else if (state.kind === 'html') {
       mdName.textContent = 'Source';
       mdHint.textContent = 'the raw .html file';
       htmlName.textContent = 'Presenter Page';
@@ -1579,8 +1653,14 @@ ${HIGHLIGHT_RUNTIME}
 
   /** Switches which document kind the chrome is dressed for. */
   function setDocKind(kind) {
-    state.kind = kind === 'html' ? 'html' : 'markdown';
+    state.kind = kind === 'html' || kind === 'article' ? kind : 'markdown';
     document.documentElement.dataset.docKind = state.kind;
+    if (state.kind !== 'markdown') {
+      // No slides here, so the slide keys and counters have nothing to act on.
+      state.slides = [];
+      state.notes = [];
+      state.index = 0;
+    }
     paintExportMenu();
   }
 
@@ -1608,6 +1688,14 @@ ${HIGHLIGHT_RUNTIME}
 
   function pickTransition(id) {
     return TRANSITION_BY_ID[id] ? id : (TRANSITION_BY_ID[D.transition] ? D.transition : 'slide');
+  }
+
+  var DESIGNS = D.designs;
+  var DESIGN_BY_ID = {};
+  DESIGNS.forEach(function (item) { DESIGN_BY_ID[item.id] = item; });
+
+  function pickDesign(id) {
+    return DESIGN_BY_ID[id] ? id : (DESIGN_BY_ID[D.design] ? D.design : DESIGNS[0].id);
   }
 
   var FACES = D.faces;
@@ -1644,6 +1732,7 @@ ${HIGHLIGHT_RUNTIME}
     body: pickFont(lsGet(K.body, D.fonts.body)),
     template: pickTemplate(lsGet(K.template, D.template)),
     transition: pickTransition(lsGet(K.transition, D.transition)),
+    design: pickDesign(lsGet(K.design, D.design)),
     frameReady: false,
     overflow: {},
     dismissed: {},
@@ -1964,6 +2053,7 @@ ${HIGHLIGHT_RUNTIME}
   }
 
   function renderCounts() {
+    if (state.kind === 'article') { renderArticleCounts(); return; }
     var n = state.slides.length;
     elChipSlides.textContent = n + (n === 1 ? ' slide' : ' slides');
     elCount.textContent = 'slide ' + (n ? state.index + 1 : 0) + ' / ' + n;
@@ -2486,12 +2576,37 @@ ${HIGHLIGHT_RUNTIME}
   }
 
   function isEmpty() {
-    return state.kind === 'html' ? !srcHtml.value.trim() : !state.slides.length;
+    if (state.kind === 'html') return !srcHtml.value.trim();
+    if (state.kind === 'article') return !src.value.trim();
+    return !state.slides.length;
+  }
+
+  /** The finished page for the open article, rendered by the server. */
+  function renderArticle(signal) {
+    return fetch('/__article', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ markdown: src.value, design: state.design, title: $('docname').value }),
+      signal: signal
+    }).then(function (r) {
+      if (!r.ok) throw new Error('server said ' + r.status);
+      return r.json();
+    });
   }
 
   /** Downloads the built deck or doc as one standalone page. */
   function exportHtml() {
     if (isEmpty()) { toast('Nothing to export yet.', 'warn'); return; }
+    if (state.kind === 'article') {
+      renderArticle()
+        .then(function (data) {
+          var name = slugify($('docname').value).replace(/\\.(md|markdown|html?)$/, '') + '.html';
+          saveBlob(name, new Blob([data.html], { type: 'text/html;charset=utf-8' }));
+          toast('Downloaded ' + name + '.');
+        })
+        .catch(function (err) { toast('Could not export HTML: ' + err.message, 'err'); });
+      return;
+    }
     var builder = state.kind === 'html' ? buildHtmlDoc : buildDeck;
     builder(false, true)
       .then(function (data) { return fetch(data.path); })
@@ -2521,24 +2636,35 @@ ${HIGHLIGHT_RUNTIME}
     elSave.className = 'warn';
     elSave.textContent = 'building the PDF';
 
-    var pdfUrl = state.kind === 'html' ? '/__pdf-doc' : '/__pdf';
-    var pdfBody = state.kind === 'html'
-      ? { html: srcHtml.value, title: $('docname').value }
-      : {
-          markdown: src.value,
-          theme: state.theme,
-          head: state.head,
-          body: state.body,
-          template: state.template,
-          transition: state.transition,
-          title: $('docname').value
-        };
+    // An article prints as the finished page, the same way an HTML doc does.
+    var pdfUrl = state.kind === 'markdown' ? '/__pdf' : '/__pdf-doc';
+    var pdfBody;
+    if (state.kind === 'html') {
+      pdfBody = Promise.resolve({ html: srcHtml.value, title: $('docname').value });
+    } else if (state.kind === 'article') {
+      pdfBody = renderArticle().then(function (data) {
+        return { html: data.html, title: $('docname').value };
+      });
+    } else {
+      pdfBody = Promise.resolve({
+        markdown: src.value,
+        theme: state.theme,
+        head: state.head,
+        body: state.body,
+        template: state.template,
+        transition: state.transition,
+        title: $('docname').value
+      });
+    }
 
-    fetch(pdfUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(pdfBody)
-    })
+    pdfBody
+      .then(function (payload) {
+        return fetch(pdfUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+      })
       .then(function (r) {
         if (r.status === 501) {
           return r.json().then(function (info) {
@@ -2558,7 +2684,7 @@ ${HIGHLIGHT_RUNTIME}
         if (!blob) return;
         var name = slugify($('docname').value).replace(/\\.(md|markdown|html?)$/, '') + '.pdf';
         saveBlob(name, blob);
-        toast('Downloaded ' + name + (state.kind === 'html' ? '.' : ', one 16:9 page per slide.'));
+        toast('Downloaded ' + name + (state.kind === 'markdown' ? ', one 16:9 page per slide.' : '.'));
       })
       .catch(function (err) { toast('Could not export the PDF: ' + err.message, 'err'); })
       .then(function () {
@@ -2572,6 +2698,20 @@ ${HIGHLIGHT_RUNTIME}
   /** No local browser to drive: hand the deck or doc to the print dialog instead. */
   function printFallback(detail) {
     var tab = window.open('about:blank', '_blank');
+    if (state.kind === 'article') {
+      buildArticle()
+        .then(function (data) {
+          var url = location.origin + data.path;
+          if (tab) tab.location.replace(url);
+          else location.href = url;
+          toast((detail || 'No local browser to render with.') + ' Press ' + CMD + ' P in the page to save a PDF.', 'warn');
+        })
+        .catch(function (err) {
+          if (tab) tab.close();
+          toast('Could not build the page: ' + err.message, 'err');
+        });
+      return;
+    }
     var builder = state.kind === 'html' ? buildHtmlDoc : buildDeck;
     builder(true)
       .then(function (data) {
@@ -2626,8 +2766,35 @@ ${HIGHLIGHT_RUNTIME}
     });
   }
 
+  /** Stashes the rendered page on the server so a new tab can open it. */
+  function buildArticle() {
+    return fetch('/__present-article', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ markdown: src.value, design: state.design, title: $('docname').value })
+    }).then(function (r) {
+      if (!r.ok) throw new Error('server said ' + r.status);
+      return r.json();
+    });
+  }
+
   function present() {
     if (isEmpty()) { toast('Nothing to present yet.', 'warn'); return; }
+    if (state.kind === 'article') {
+      // An article is just opened as the page it is: no presenter chrome.
+      var pageTab = window.open('about:blank', '_blank');
+      buildArticle()
+        .then(function (data) {
+          var url = location.origin + data.path;
+          if (pageTab) pageTab.location.replace(url);
+          else toast('Allow pop-ups to open the page in a new tab.', 'warn', 'open here', function () { location.href = url; });
+        })
+        .catch(function (err) {
+          if (pageTab) pageTab.close();
+          toast('Could not build the page: ' + err.message, 'err');
+        });
+      return;
+    }
     expectingDeck = true;
     var builder = state.kind === 'html' ? buildHtmlDoc : buildDeck;
     var tab = window.open('about:blank', '_blank');
@@ -2701,8 +2868,76 @@ ${HIGHLIGHT_RUNTIME}
     paintFontMenu();
   }
 
+  function setDesign(next, remember) {
+    var id = pickDesign(next);
+    var changed = id !== state.design;
+    state.design = id;
+    if (remember !== false) {
+      lsSet(K.design, id);
+      if (changed) scheduleSave();
+    }
+    paintDesignMenu();
+    if (changed && state.kind === 'article') refreshArticle();
+  }
+
+  function paintDesignMenu() {
+    var d = DESIGN_BY_ID[state.design];
+    Array.prototype.forEach.call($('design-list').querySelectorAll('[data-design]'), function (b) {
+      b.classList.toggle('is-on', b.dataset.design === state.design);
+    });
+    $('design-label').textContent = d ? d.label : 'design';
+    $('design-dot').style.background = d ? 'linear-gradient(135deg, ' + d.bg + ' 50%, ' + d.accent + ' 50%)' : '';
+    $('btn-design').title = d ? d.label + ' — ' + d.blurb : 'Page design';
+    paintExportMenu();
+  }
+
+  function buildDesignMenu() {
+    var host = $('design-list');
+    host.innerHTML = '';
+    DESIGNS.forEach(function (item) { host.appendChild(optionRow('design', item)); });
+    paintDesignMenu();
+  }
+
+  // ── Article preview ──────────────────────────────────────────────────
+  // The server renders the page, so the preview is byte-for-byte what the
+  // export and \`deckrun convert\` produce. Only a <base> is added here, so
+  // images referenced by path resolve against the folder deckrun serves.
+  var articleSeq = 0, articleInflight = null, articleScroll = null;
+
+  function refreshArticle() {
+    var mine = ++articleSeq;
+    if (articleInflight) articleInflight.abort();
+    articleInflight = new AbortController();
+    renderArticle(articleInflight.signal)
+      .then(function (data) {
+        if (mine !== articleSeq || state.kind !== 'article') return;
+        try {
+          var win = frameHtml.contentWindow;
+          articleScroll = win && win.document.documentElement.dataset.design ? win.scrollY : null;
+        } catch (e) { articleScroll = null; }
+        var base = '<base href="' + location.origin + '/">';
+        frameHtml.srcdoc = data.html.replace(/<head>/i, '<head>' + base);
+      })
+      .catch(function (err) {
+        if (err && err.name === 'AbortError') return;
+        toast('Preview failed: ' + err.message + '. Is the server still running?', 'err');
+      });
+  }
+
+  /** Typing re-renders the page; keep the reader where they were. */
+  function restoreArticleScroll() {
+    if (state.kind !== 'article' || articleScroll === null) return;
+    try { frameHtml.contentWindow.scrollTo(0, articleScroll); } catch (e) {}
+  }
+
+  function renderArticleCounts() {
+    var words = src.value.trim() ? src.value.trim().split(/\\s+/).length : 0;
+    elWords.textContent = words + (words === 1 ? ' word' : ' words');
+    elChipSlides.textContent = 'html page';
+  }
+
   function syncHtmlFrameTheme() {
-    if (!frameHtml) return;
+    if (!frameHtml || state.kind === 'article') return;
     try {
       var root = frameHtml.contentDocument && frameHtml.contentDocument.documentElement;
       if (root) {
@@ -3028,6 +3263,7 @@ ${HIGHLIGHT_RUNTIME}
     setDocKind(meta.kind || 'markdown');
     setTemplate(meta.template || state.template, true);
     setTransition(meta.transition || state.transition, true);
+    if (state.kind === 'article') setDesign(meta.design || state.design, true);
     $('docname').value = meta.name;
     updateDocTitle();
     updateDeckCount();
@@ -3051,7 +3287,13 @@ ${HIGHLIGHT_RUNTIME}
     paint();
     syncScroll();
     updateCaretUi();
-    refresh();
+    if (state.kind === 'article') {
+      articleScroll = null;
+      renderArticleCounts();
+      refreshArticle();
+    } else {
+      refresh();
+    }
     if (announce) toast('Opened ' + meta.name);
     src.focus();
   }
@@ -3073,7 +3315,7 @@ ${HIGHLIGHT_RUNTIME}
     if (fileModeBlocks()) return;
     saveNow();
     var meta = findDeck(state.deckId);
-    var id = createDeck(uniqueName((meta ? meta.name : 'deck') + ' copy'), curValue(), state.kind);
+    var id = createDeck(uniqueName((meta ? meta.name : 'deck') + ' copy'), curValue(), state.kind, null, null, state.design);
     if (!id) { noRoom(); return; }
     openDeck(id);
     toast('Duplicated');
@@ -3131,7 +3373,12 @@ ${HIGHLIGHT_RUNTIME}
       var meta = document.createElement('div');
       meta.className = 'lib-row__meta';
       var kind = deck.kind || 'markdown';
-      if (kind === 'html') {
+      if (kind === 'article') {
+        var design = DESIGN_BY_ID[deck.design] ? DESIGN_BY_ID[deck.design].label.toLowerCase() : 'plain';
+        meta.textContent = 'html page \u00b7 ' + design +
+          '  \u00b7  ' + Math.max(1, Math.round((deck.chars || 0) / 1024)) + ' KB' +
+          '  \u00b7  ' + timeAgo(deck.at || Date.now());
+      } else if (kind === 'html') {
         var chars = deck.id === state.deckId ? srcHtml.value.length : deck.chars;
         meta.textContent = 'html' +
           '  \u00b7  ' + Math.max(1, Math.round((chars || 0) / 1024)) + ' KB' +
@@ -3159,7 +3406,8 @@ ${HIGHLIGHT_RUNTIME}
           readDeck(deck.id),
           deck.kind || 'markdown',
           deck.template || state.template,
-          deck.transition || state.transition
+          deck.transition || state.transition,
+          deck.design || state.design
         );
         if (!id) { noRoom(); return; }
         updateDeckCount();
@@ -3206,6 +3454,9 @@ ${HIGHLIGHT_RUNTIME}
   // the library — never on an ordinary launch that has a deck to resume.
   var startTemplate = state.template;
   var startTransition = state.transition;
+  var startDesign = state.design;
+  // The one file input serves every card; this says which card opened it.
+  var uploadAs = null;
 
   function paintStartOptions() {
     Array.prototype.forEach.call($('start-template-list').querySelectorAll('[data-template]'), function (b) {
@@ -3213,6 +3464,9 @@ ${HIGHLIGHT_RUNTIME}
     });
     Array.prototype.forEach.call($('start-transition-list').querySelectorAll('[data-transition]'), function (b) {
       b.classList.toggle('is-on', b.dataset.transition === startTransition);
+    });
+    Array.prototype.forEach.call($('start-design-list').querySelectorAll('[data-design]'), function (b) {
+      b.classList.toggle('is-on', b.dataset.design === startDesign);
     });
   }
 
@@ -3239,12 +3493,24 @@ ${HIGHLIGHT_RUNTIME}
       b.addEventListener('click', function () { startTransition = item.id; paintStartOptions(); });
       transitionHost.appendChild(b);
     });
+    var designHost = $('start-design-list');
+    designHost.innerHTML = '';
+    DESIGNS.forEach(function (item) {
+      var b = document.createElement('button');
+      b.className = 'start-choice';
+      b.dataset.design = item.id;
+      b.textContent = item.label;
+      b.title = item.blurb;
+      b.addEventListener('click', function () { startDesign = item.id; paintStartOptions(); });
+      designHost.appendChild(b);
+    });
     paintStartOptions();
   }
 
   function showStartScreen() {
     startTemplate = state.template;
     startTransition = state.transition;
+    startDesign = state.design;
     paintStartOptions();
     $('start-lib').classList.toggle('is-disabled', !loadIndex().length);
     $('screen-start').classList.add('is-on');
@@ -3293,6 +3559,17 @@ ${HIGHLIGHT_RUNTIME}
     openDeck(id);
     setTimeout(function () {
       toast('This deck is yours to overwrite. Press ' + CMD + ' K to see every layout and style.', null, 'open the guide', function () { runAction('guide'); });
+    }, 900);
+  }
+
+  function startNewArticle() {
+    setDesign(startDesign, true);
+    var id = createDeck(uniqueName('untitled page'), D.welcomeArticle, 'article', null, null, startDesign);
+    hideStartScreenSilently();
+    if (!id) { noRoom(); return; }
+    openDeck(id);
+    setTimeout(function () {
+      toast('Paste or write Markdown on the left. The design menu in the top bar restyles the page.');
     }, 900);
   }
 
@@ -3349,8 +3626,10 @@ ${HIGHLIGHT_RUNTIME}
   }
 
   $('start-md-blank').addEventListener('click', startNewMarkdown);
-  $('start-md-upload').addEventListener('click', function () { $('file-any').click(); });
-  $('start-html-upload').addEventListener('click', function () { $('file-any').click(); });
+  $('start-md-upload').addEventListener('click', function () { uploadAs = 'markdown'; $('file-any').click(); });
+  $('start-html-upload').addEventListener('click', function () { uploadAs = null; $('file-any').click(); });
+  $('start-article-blank').addEventListener('click', startNewArticle);
+  $('start-article-upload').addEventListener('click', function () { uploadAs = 'article'; $('file-any').click(); });
   $('start-html-url-go').addEventListener('click', loadHtmlUrl);
   $('start-html-url').addEventListener('keydown', function (e) {
     if (e.key === 'Enter') { e.preventDefault(); loadHtmlUrl(); }
@@ -3365,7 +3644,11 @@ ${HIGHLIGHT_RUNTIME}
     else if (name === 'html') exportHtml();
     else if (name === 'open') $('file-any').click();
     else if (name === 'grid') setMode(state.mode === 'grid' ? 'single' : 'grid');
-    else if (name === 'theme') openThemes();
+    else if (name === 'theme') {
+      // An article's look is its design; the slide themes do not apply.
+      if (state.kind === 'article') toggleMenu($('design-wrap'));
+      else openThemes();
+    }
     else if (name === 'guide') { guide.classList.add('is-on'); }
     else if (name === 'palette') openPalette();
     else if (name === 'decks') openLibrary();
@@ -3385,6 +3668,11 @@ ${HIGHLIGHT_RUNTIME}
     updateCaretUi();
     scheduleSave();
     if (parseTimer) clearTimeout(parseTimer);
+    if (state.kind === 'article') {
+      renderArticleCounts();
+      parseTimer = setTimeout(refreshArticle, 140);
+      return;
+    }
     parseTimer = setTimeout(refresh, 140);
   }
 
@@ -3416,6 +3704,7 @@ ${HIGHLIGHT_RUNTIME}
 
   srcHtml.addEventListener('input', onHtmlInput);
   frameHtml.addEventListener('load', syncHtmlFrameTheme);
+  frameHtml.addEventListener('load', restoreArticleScroll);
   srcHtml.addEventListener('click', renderHtmlCounts);
   srcHtml.addEventListener('keyup', function (e) {
     if (e.key.indexOf('Arrow') === 0 || e.key === 'Home' || e.key === 'End' ||
@@ -3456,7 +3745,11 @@ ${HIGHLIGHT_RUNTIME}
     if (!files || !files.length) return;
     for (var i = 0; i < files.length; i++) {
       var f = files[i];
-      if (/\\.(md|markdown|txt)$/i.test(f.name)) loadMarkdownFile(f);
+      // Dropped onto an open article, Markdown stays an article.
+      if (/\\.(md|markdown|txt)$/i.test(f.name)) {
+        if (state.kind === 'article') loadArticleFile(f, state.design);
+        else loadMarkdownFile(f);
+      }
       else if (/\\.html?$/i.test(f.name)) loadHtmlFile(f);
       else toast('Skipped ' + f.name + '. Drop a Markdown or HTML file to open it.', 'warn');
     }
@@ -3486,6 +3779,26 @@ ${HIGHLIGHT_RUNTIME}
     fr.readAsText(file);
   }
 
+  /** A .md file opened as an HTML page lands as a new article entry. */
+  function loadArticleFile(file, chosenDesign) {
+    if (fileModeBlocks()) return;
+    var fr = new FileReader();
+    fr.onload = function () {
+      saveNow();
+      var markdown = String(fr.result).replace(/\\r\\n/g, '\\n').replace(/\\r/g, '\\n');
+      var name = uniqueName(file.name.replace(/\\.(md|markdown|txt)$/i, '') || 'untitled page');
+      var design = chosenDesign || state.design;
+      var id = createDeck(name, markdown, 'article', null, null, design);
+      if (!id) { noRoom(); return; }
+      setDesign(design, true);
+      hideStartScreenSilently();
+      openDeck(id);
+      toast('Loaded ' + file.name + ' as an HTML page');
+    };
+    fr.onerror = function () { toast('Could not read ' + file.name, 'err'); };
+    fr.readAsText(file);
+  }
+
   /** An uploaded HTML doc lands as a new library entry, same as a .md file. */
   function loadHtmlFile(file) {
     if (fileModeBlocks()) return;
@@ -3508,7 +3821,9 @@ ${HIGHLIGHT_RUNTIME}
     var f = e.target.files[0];
     if (f) {
       var fromStart = $('screen-start').classList.contains('is-on');
-      if (/\\.(md|markdown|txt)$/i.test(f.name)) {
+      if (/\\.(md|markdown|txt)$/i.test(f.name) && fromStart && uploadAs === 'article') {
+        loadArticleFile(f, startDesign);
+      } else if (/\\.(md|markdown|txt)$/i.test(f.name)) {
         loadMarkdownFile(
           f,
           fromStart ? startTemplate : state.template,
@@ -3519,6 +3834,7 @@ ${HIGHLIGHT_RUNTIME}
       else toast('Unrecognized file type.', 'warn');
     }
     e.target.value = '';
+    uploadAs = null;
   });
 
   $('docname').addEventListener('input', function () {
@@ -3606,6 +3922,10 @@ ${HIGHLIGHT_RUNTIME}
     if (btn.dataset.template) setTemplate(btn.dataset.template, true);
     if (btn.dataset.transition) setTransition(btn.dataset.transition, true);
   }, 'button[data-template], button[data-transition]');
+
+  bindMenu('btn-design', 'design-menu', function (btn) {
+    setDesign(btn.dataset.design, true);
+  }, 'button[data-design]');
 
   document.addEventListener('click', function (e) {
     if (openMenu && !openMenu.contains(e.target)) closeMenu();
@@ -3700,6 +4020,8 @@ ${HIGHLIGHT_RUNTIME}
     if (mod) {
       var key = e.key.toLowerCase();
       var md = state.kind === 'markdown';
+      // Pages are Markdown too, so the inline formatting keys still apply.
+      var mdText = md || state.kind === 'article';
 
       if (key === 'k' && !e.shiftKey && md) { e.preventDefault(); openPalette(); }
       else if (key === 'o') { e.preventDefault(); openLibrary(); }
@@ -3708,9 +4030,9 @@ ${HIGHLIGHT_RUNTIME}
       else if (key === 's') { e.preventDefault(); saveNow(); download(); }
       else if (key === 'enter') { e.preventDefault(); present(); }
       else if (key === 'd' && md) { e.preventDefault(); insertSnippet(bySnippetId['slide-break']); }
-      else if (key === 'b' && md) { e.preventDefault(); insertSnippet(bySnippetId.bold); }
-      else if (key === 'i' && md) { e.preventDefault(); insertSnippet(bySnippetId.italic); }
-      else if (key === 'e' && md) { e.preventDefault(); insertSnippet(bySnippetId['inline-code']); }
+      else if (key === 'b' && mdText) { e.preventDefault(); insertSnippet(bySnippetId.bold); }
+      else if (key === 'i' && mdText) { e.preventDefault(); insertSnippet(bySnippetId.italic); }
+      else if (key === 'e' && mdText) { e.preventDefault(); insertSnippet(bySnippetId['inline-code']); }
       else if (key === 'g' && md) { e.preventDefault(); runAction('grid'); }
       else if (key === 'l' && e.shiftKey) { e.preventDefault(); runAction('theme'); }
       return;
@@ -3836,6 +4158,7 @@ ${HIGHLIGHT_RUNTIME}
   document.documentElement.dataset.transition = state.transition;
   buildFontMenu();
   buildTemplateMenu();
+  buildDesignMenu();
   buildStartOptions();
   paintThemeButton();
   $('seg-single').classList.toggle('is-on', state.mode === 'single');

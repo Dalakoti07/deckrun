@@ -1,8 +1,9 @@
 # deckrun
 
-Write slides in Markdown or bring a self-contained HTML document, run a local server, and present either in the browser.
+Write slides in Markdown or bring a self-contained HTML document, run a local server, and present either in the browser. Or turn a plain Markdown file into one self-contained HTML page.
 
-- **Two formats** - Markdown decks with slide-by-slide presentation, or self-contained HTML documents with continuous scrolling
+- **Three formats** - Markdown decks with slide-by-slide presentation, self-contained HTML documents with continuous scrolling, or a Markdown file converted into a standalone HTML page
+- **Markdown to HTML pages** - paste or upload a `.md` file, pick the Dark, Plain, or Crimson design, and export one self-contained `.html` file, in the editor or with `deckrun convert`
 - **Live editor** - edit alongside a live preview, with autosave and a library of all your decks and docs
 - **14 themes** - unique palettes, typography, animated backdrops, and customizable heading and body fonts
 - **Templates and motion** - four composition templates and five transitions, switchable without touching the Markdown
@@ -98,6 +99,9 @@ deckrun --list-themes
 deckrun --list-fonts
 deckrun --list-templates
 deckrun --list-transitions
+
+# Convert a Markdown file into one self-contained HTML page
+deckrun convert notes.md --design crimson
 ```
 
 On start, the CLI prints the slide count and the local URL:
@@ -172,9 +176,44 @@ Errors fail the command. Warnings also fail by default, making the command
 useful in CI; `--max-warnings N` changes that threshold and `-1` allows any
 number of warnings. Pass `-` as the file to lint standard input.
 
+### `deckrun convert`
+
+Turns a plain Markdown file into one self-contained HTML page for reading,
+not slides. `---` is a horizontal rule here, not a slide break.
+
+```bash
+deckrun convert notes.md                     # writes notes.html, Plain design
+deckrun convert notes.md --design dark       # or -d dark
+deckrun convert notes.md -d crimson -o site/index.html
+cat notes.md | deckrun convert - > notes.html
+deckrun convert --list-designs
+```
+
+| Option                | Default | Description                                              |
+| --------------------- | ------- | -------------------------------------------------------- |
+| `[file]`              |         | Markdown file to convert; `-` reads standard input        |
+| `-d, --design <name>` | `plain` | `dark`, `plain`, or `crimson`                             |
+| `-o, --out <path>`    | `<file>.html` | Where to write the page; `-` writes to standard output (the default for stdin) |
+| `--list-designs`      |         | Print every design, then exit                             |
+
+| Design    | What it is                                              |
+| --------- | ------------------------------------------------------- |
+| `dark`    | Light text on deep charcoal, with a cool blue accent    |
+| `plain`   | Black on white, quiet and print-friendly                |
+| `crimson` | Crimson accents on warm cream, set in a book serif      |
+
+What "self-contained" means for the page:
+
+- Styles are inline, and the page uses fonts already on the reader's machine, so it needs no web fonts.
+- Code blocks are colored when the page is built, so no highlighter loads in the page.
+- KaTeX and Mermaid load from a pinned CDN, and only when the Markdown has math or a Mermaid diagram.
+- Local images referenced by path are embedded as `data:` URIs, resolved against the Markdown file's folder. Remote images stay as links. An image that cannot be read keeps its path and prints a warning.
+
+An unknown design is an error, not a silent fallback.
+
 ## The editor
 
-Run `deckrun` with no file and it serves an editor instead of a deck. A deck already in this browser resumes with no extra step, exactly as before. The first time you run it — or any time you choose "new" from the library with nothing open yet — you land on a start screen instead: a new Markdown deck, a new or uploaded HTML doc, or the library. Pick Markdown and you get the usual pane pair, Markdown on the left and the live deck on the right, plus a library of every deck and doc you have written.
+Run `deckrun` with no file and it serves an editor instead of a deck. A deck already in this browser resumes with no extra step, exactly as before. The first time you run it — or any time you choose "new" from the library with nothing open yet — you land on a start screen instead: a new Markdown deck, a Markdown file turned into an HTML page, a new or uploaded HTML doc, or the library. Pick Markdown and you get the usual pane pair, Markdown on the left and the live deck on the right, plus a library of every deck and doc you have written.
 
 ```bash
 deckrun
@@ -246,6 +285,23 @@ Presenting wraps the doc in an iframe and layers the tool belt that still makes 
 A doc authored in the browser editor is expected to be self-contained: inline styles and scripts, and assets from a CDN or a `data:` URI rather than a relative local path, since editor-mode present and PDF serve it from an in-memory copy, not from a folder on disk. A file passed on the CLI does not have that restriction — `deckrun page.html` serves assets from the file's own directory, exactly like a Markdown deck's images, so `<img src="diagram.png">` next to `page.html` resolves normally.
 
 If a doc runs its own script that listens for keyboard input — an embedded framework, a game, a chart with its own shortcuts — it may end up racing deckrun's own listener for a key, since both are attached to the same page. Presenter shortcuts are best-effort in that case, not guaranteed to win.
+
+### Markdown to HTML pages
+
+The start screen's second card turns Markdown into one self-contained HTML
+page rather than slides. Choose a design (Dark, Plain, or Crimson), then
+start blank and paste your Markdown in, or upload a `.md` file. A `.md` file
+dropped onto an open page opens as another page.
+
+The left pane is the usual Markdown editor. The right pane is the finished
+page, rendered by the server exactly as `deckrun convert` renders it. The
+`design` menu in the top bar replaces the slide controls (template, theme,
+font, guide, insert) and restyles the page live. The design is saved with the
+page in the library.
+
+- `present` opens the page in a new tab, with no presenter chrome.
+- `export` → HTML page downloads the self-contained `.html` file. Markdown downloads the source, and PDF prints the page.
+- Images referenced by path show in the preview but stay as paths in an editor export, since the editor keeps Markdown and not files. Use `deckrun convert` to embed them.
 
 ### The deck library
 
@@ -1038,6 +1094,7 @@ The source:
 - `src/presentation-options.ts` is the composition-template and transition registry
 - `src/fragments.ts` contains incremental-reveal styles and DOM preparation shared by preview and presentation
 - `src/lint.ts` implements the static deck authoring rules behind `deckrun lint`
+- `src/article.ts` renders Markdown into a self-contained HTML page in one of the three reading designs, for the editor and `deckrun convert`
 - `src/rich-content.ts` detects and renders KaTeX and Mermaid content, with a shared readiness signal
 - `src/generate.ts` holds the slide CSS, the presenter chrome, and the deck runtime
 - `src/preview.ts` is the editor's preview iframe, sharing the slide CSS with the deck

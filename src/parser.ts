@@ -1,4 +1,4 @@
-import { marked } from "marked";
+import { marked, type TokenizerAndRendererExtension } from "marked";
 
 function escapeHtml(value: string): string {
   return value
@@ -13,56 +13,62 @@ function escapeHtml(value: string): string {
  * operators such as `*` and `_` inside a formula instead of turning them into
  * emphasis. The browser can then render these deliberately marked nodes with
  * KaTeX after fonts and layout styles are available.
+ *
+ * Exported so the article renderer reads math exactly the way slides do.
  */
+export const MATH_EXTENSIONS: TokenizerAndRendererExtension[] = [
+  {
+    name: "deckrunBlockMath",
+    level: "block",
+    tokenizer(src) {
+      const dollars = /^\$\$[ \t]*\n?([\s\S]+?)\n?[ \t]*\$\$(?:[ \t]*(?:\n|$))/.exec(src);
+      const brackets = /^\\\[[ \t]*\n?([\s\S]+?)\n?[ \t]*\\\](?:[ \t]*(?:\n|$))/.exec(src);
+      const match = dollars ?? brackets;
+      if (!match) return;
+      return {
+        type: "deckrunBlockMath",
+        raw: match[0],
+        text: match[1].trim(),
+        display: true,
+      };
+    },
+    renderer(token) {
+      return `<div class="math-source" data-display="true">${escapeHtml(String(token.text))}</div>\n`;
+    },
+  },
+  {
+    name: "deckrunInlineMath",
+    level: "inline",
+    start(src) {
+      const dollar = src.indexOf("$");
+      const paren = src.indexOf("\\(");
+      if (dollar < 0) return paren < 0 ? undefined : paren;
+      if (paren < 0) return dollar;
+      return Math.min(dollar, paren);
+    },
+    tokenizer(src) {
+      // A closing dollar followed by a digit is treated as currency rather
+      // than math, so ordinary prose like "$5 and $10" stays untouched.
+      const dollars = /^\$(?!\s|\$)((?:\\.|[^\\$\n])*?[^\\$\s])\$(?!\$|\d)/.exec(src);
+      const parens = /^\\\(((?:\\.|[^\\\n])*?)\\\)/.exec(src);
+      const match = dollars ?? parens;
+      if (!match) return;
+      return {
+        type: "deckrunInlineMath",
+        raw: match[0],
+        text: match[1],
+        display: false,
+      };
+    },
+    renderer(token) {
+      return `<span class="math-source" data-display="false">${escapeHtml(String(token.text))}</span>`;
+    },
+  },
+];
+
 marked.use({
   extensions: [
-    {
-      name: "deckrunBlockMath",
-      level: "block",
-      tokenizer(src) {
-        const dollars = /^\$\$[ \t]*\n?([\s\S]+?)\n?[ \t]*\$\$(?:[ \t]*(?:\n|$))/.exec(src);
-        const brackets = /^\\\[[ \t]*\n?([\s\S]+?)\n?[ \t]*\\\](?:[ \t]*(?:\n|$))/.exec(src);
-        const match = dollars ?? brackets;
-        if (!match) return;
-        return {
-          type: "deckrunBlockMath",
-          raw: match[0],
-          text: match[1].trim(),
-          display: true,
-        };
-      },
-      renderer(token) {
-        return `<div class="math-source" data-display="true">${escapeHtml(String(token.text))}</div>\n`;
-      },
-    },
-    {
-      name: "deckrunInlineMath",
-      level: "inline",
-      start(src) {
-        const dollar = src.indexOf("$");
-        const paren = src.indexOf("\\(");
-        if (dollar < 0) return paren < 0 ? undefined : paren;
-        if (paren < 0) return dollar;
-        return Math.min(dollar, paren);
-      },
-      tokenizer(src) {
-        // A closing dollar followed by a digit is treated as currency rather
-        // than math, so ordinary prose like "$5 and $10" stays untouched.
-        const dollars = /^\$(?!\s|\$)((?:\\.|[^\\$\n])*?[^\\$\s])\$(?!\$|\d)/.exec(src);
-        const parens = /^\\\(((?:\\.|[^\\\n])*?)\\\)/.exec(src);
-        const match = dollars ?? parens;
-        if (!match) return;
-        return {
-          type: "deckrunInlineMath",
-          raw: match[0],
-          text: match[1],
-          display: false,
-        };
-      },
-      renderer(token) {
-        return `<span class="math-source" data-display="false">${escapeHtml(String(token.text))}</span>`;
-      },
-    },
+    ...MATH_EXTENSIONS,
     {
       name: "deckrunRevealMarker",
       level: "inline",

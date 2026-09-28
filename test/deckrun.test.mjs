@@ -391,3 +391,103 @@ test("The type size option is gone from every surface", async () => {
   assert.ok(deck.includes("--slide-pad-y: 4.4rem"));
   assert.ok(deck.includes("--slide-pad-x: 6rem"));
 });
+
+test("Articles render Markdown as one self-contained page in a reading design", async () => {
+  const { renderArticle, findArticleDesign, resolveArticleDesign, articleDesignListing, DEFAULT_ARTICLE_DESIGN } =
+    await import("../dist/article.js");
+
+  assert.equal(DEFAULT_ARTICLE_DESIGN, "plain");
+  assert.equal(findArticleDesign("Crimson"), "crimson");
+  assert.equal(findArticleDesign("nord"), null, "slide themes are not page designs");
+  assert.equal(resolveArticleDesign("nope"), "plain");
+  assert.equal(articleDesignListing().length, 3);
+
+  const md = "# Notes & Ideas\n\nIntro\n\n---\n\nAfter the rule\n\n```js\nconst a = 1;\n```\n";
+  const page = renderArticle(md, { design: "dark" });
+  assert.equal(page.design, "dark");
+  assert.equal(page.title, "Notes & Ideas");
+  assert.match(page.html, /^<!DOCTYPE html>/);
+  assert.match(page.html, /<title>Notes &amp; Ideas<\/title>/);
+  assert.match(page.html, /data-design="dark"/);
+  assert.match(page.html, /--bg: #0f1115;/);
+  assert.match(page.html, /<hr>/, "three dashes are a divider, not a slide break");
+  assert.ok(!page.html.includes("slide"), "no slide markup");
+  assert.match(page.html, /<span class="hljs-keyword">const<\/span>/, "code is colored at build time");
+
+  // Nothing external loads unless the page actually needs it.
+  assert.ok(!/<script[^>]+src=/.test(page.html), "no external scripts");
+  assert.ok(!/<link[^>]+href=/.test(page.html), "no external stylesheets");
+
+  const rich = renderArticle("Math $a^2$\n\n```mermaid\ngraph TD; A-->B\n```\n", { design: "plain" });
+  assert.match(rich.html, /cdn\.jsdelivr\.net\/npm\/katex/);
+  assert.match(rich.html, /cdn\.jsdelivr\.net\/npm\/mermaid/);
+  assert.match(rich.html, /deckrunMermaidTheme = "neutral"/);
+  assert.match(rich.html, /class="language-mermaid"/);
+
+  const untitled = renderArticle("just text", { fallbackTitle: "my-notes" });
+  assert.equal(untitled.title, "my-notes");
+  assert.equal(untitled.design, "plain");
+});
+
+test("Article images can be rewritten, and every attribute is escaped", async () => {
+  const { renderArticle } = await import("../dist/article.js");
+  const seen = [];
+  const page = renderArticle('![a "b" <c>](pic.png "cap")\n\n![remote](https://x.test/y.png)', {
+    resolveImage: (src) => {
+      seen.push(src);
+      return src === "pic.png" ? "data:image/png;base64,AAA" : null;
+    },
+  });
+  assert.deepEqual(seen, ["pic.png", "https://x.test/y.png"]);
+  assert.match(page.html, /<img src="data:image\/png;base64,AAA" alt="a &quot;b&quot; &lt;c&gt;" title="cap"/);
+  assert.match(page.html, /<img src="https:\/\/x\.test\/y\.png"/);
+
+  const code = renderArticle("```nolang\n<script>alert(1)</script>\n```");
+  assert.match(code.html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+});
+
+test("The editor offers Markdown to HTML pages with the three designs", () => {
+  const editor = generateEditorHtml();
+  const boot = JSON.parse(editor.match(/<script type="application\/json" id="bootstrap">([\s\S]*?)<\/script>/)[1]);
+  assert.deepEqual(boot.designs.map((d) => d.id), ["dark", "plain", "crimson"]);
+  assert.equal(boot.design, "plain");
+  assert.ok(boot.welcomeArticle.startsWith("# "));
+  assert.ok(editor.includes('id="start-article-card"'));
+  assert.ok(editor.includes('id="design-menu"'));
+  assert.ok(editor.includes("/__article"));
+  assert.ok(editor.includes("/__present-article"));
+});
+
+test("deckrun convert writes a self-contained page and inlines local images", async () => {
+  const { mkdtempSync, writeFileSync, readFileSync, existsSync, copyFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { spawnSync } = await import("node:child_process");
+  const cli = new URL("../dist/index.js", import.meta.url).pathname;
+
+  const dir = mkdtempSync(join(tmpdir(), "deckrun-convert-"));
+  copyFileSync(new URL("../examples/image.png", import.meta.url), join(dir, "shot.png"));
+  writeFileSync(join(dir, "notes.md"), "# Field notes\n\n![shot](shot.png)\n\n![gone](missing.png)\n");
+
+  const ok = spawnSync(process.execPath, [cli, "convert", "notes.md", "--design", "crimson"], { cwd: dir, encoding: "utf-8" });
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.ok(existsSync(join(dir, "notes.html")));
+  const html = readFileSync(join(dir, "notes.html"), "utf-8");
+  assert.match(html, /data-design="crimson"/);
+  assert.match(html, /<title>Field notes<\/title>/);
+  assert.match(html, /<img src="data:image\/png;base64,/);
+  assert.match(html, /<img src="missing\.png"/, "an unreadable image keeps its path");
+  assert.match(ok.stderr, /cannot read image 'missing\.png'/);
+
+  const out = spawnSync(process.execPath, [cli, "convert", "-", "-d", "dark"], { cwd: dir, input: "# Piped\n", encoding: "utf-8" });
+  assert.equal(out.status, 0);
+  assert.match(out.stdout, /<title>Piped<\/title>/);
+
+  const bad = spawnSync(process.execPath, [cli, "convert", "notes.md", "--design", "nord"], { cwd: dir, encoding: "utf-8" });
+  assert.equal(bad.status, 1);
+  assert.match(bad.stderr, /unknown design 'nord'/);
+
+  const list = spawnSync(process.execPath, [cli, "convert", "--list-designs"], { encoding: "utf-8" });
+  assert.match(list.stdout, /^dark/m);
+  assert.match(list.stdout, /^crimson/m);
+});

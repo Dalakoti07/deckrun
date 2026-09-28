@@ -145,7 +145,7 @@ export const RICH_CONTENT_RUNTIME = `(function () {
       try {
         window.mermaid.initialize({
           startOnLoad: false,
-          theme: 'dark',
+          theme: window.deckrunMermaidTheme || 'dark',
           securityLevel: 'loose'
         });
       } catch (e) {}

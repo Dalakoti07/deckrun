@@ -1655,6 +1655,8 @@ ${HIGHLIGHT_RUNTIME}
   function setDocKind(kind) {
     state.kind = kind === 'html' || kind === 'article' ? kind : 'markdown';
     document.documentElement.dataset.docKind = state.kind;
+    // The frame is about to show something else, so nothing in it is a page.
+    if (state.kind !== 'article') previewDoc = null;
     if (state.kind !== 'markdown') {
       // No slides here, so the slide keys and counters have nothing to act on.
       state.slides = [];
@@ -2582,11 +2584,13 @@ ${HIGHLIGHT_RUNTIME}
   }
 
   /** The finished page for the open article, rendered by the server. */
-  function renderArticle(signal) {
-    return fetch('/__article', {
+  function postArticle(url, extra, signal) {
+    var payload = { markdown: src.value, design: state.design, title: $('docname').value };
+    for (var k in extra) payload[k] = extra[k];
+    return fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ markdown: src.value, design: state.design, title: $('docname').value }),
+      body: JSON.stringify(payload),
       signal: signal
     }).then(function (r) {
       if (!r.ok) throw new Error('server said ' + r.status);
@@ -2594,11 +2598,20 @@ ${HIGHLIGHT_RUNTIME}
     });
   }
 
+  /**
+   * The page as the server renders it. A download leaves deckrun, so it asks
+   * for KaTeX and Mermaid off the CDN; everything shown locally (preview,
+   * PDF) uses deckrun's own copies and works offline.
+   */
+  function renderArticle(signal, forDownload) {
+    return postArticle('/__article', { assets: forDownload ? 'cdn' : 'local' }, signal);
+  }
+
   /** Downloads the built deck or doc as one standalone page. */
   function exportHtml() {
     if (isEmpty()) { toast('Nothing to export yet.', 'warn'); return; }
     if (state.kind === 'article') {
-      renderArticle()
+      renderArticle(undefined, true)
         .then(function (data) {
           var name = slugify($('docname').value).replace(/\\.(md|markdown|html?)$/, '') + '.html';
           saveBlob(name, new Blob([data.html], { type: 'text/html;charset=utf-8' }));
@@ -2702,9 +2715,13 @@ ${HIGHLIGHT_RUNTIME}
       buildArticle()
         .then(function (data) {
           var url = location.origin + data.path;
-          if (tab) tab.location.replace(url);
-          else location.href = url;
-          toast((detail || 'No local browser to render with.') + ' Press ' + CMD + ' P in the page to save a PDF.', 'warn');
+          var hint = (detail || 'No local browser to render with.') + ' Press ' + CMD + ' P in the page to save a PDF.';
+          if (tab) {
+            tab.location.replace(url);
+            toast(hint, 'warn');
+          } else {
+            toast('Allow pop-ups, then try again. ' + hint, 'warn', 'open here', function () { saveNow(); location.href = url; });
+          }
         })
         .catch(function (err) {
           if (tab) tab.close();
@@ -2768,14 +2785,7 @@ ${HIGHLIGHT_RUNTIME}
 
   /** Stashes the rendered page on the server so a new tab can open it. */
   function buildArticle() {
-    return fetch('/__present-article', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ markdown: src.value, design: state.design, title: $('docname').value })
-    }).then(function (r) {
-      if (!r.ok) throw new Error('server said ' + r.status);
-      return r.json();
-    });
+    return postArticle('/__present-article', {});
   }
 
   function present() {
@@ -2787,7 +2797,7 @@ ${HIGHLIGHT_RUNTIME}
         .then(function (data) {
           var url = location.origin + data.path;
           if (pageTab) pageTab.location.replace(url);
-          else toast('Allow pop-ups to open the page in a new tab.', 'warn', 'open here', function () { location.href = url; });
+          else toast('Allow pop-ups to open the page in a new tab.', 'warn', 'open here', function () { saveNow(); location.href = url; });
         })
         .catch(function (err) {
           if (pageTab) pageTab.close();
@@ -2903,6 +2913,9 @@ ${HIGHLIGHT_RUNTIME}
   // export and \`deckrun convert\` produce. Only a <base> is added here, so
   // images referenced by path resolve against the folder deckrun serves.
   var articleSeq = 0, articleInflight = null, articleScroll = null;
+  // Which document the preview frame is showing, so a scroll position is
+  // only ever carried across a re-render of that same document.
+  var previewDoc = null;
 
   function refreshArticle() {
     var mine = ++articleSeq;
@@ -2911,10 +2924,12 @@ ${HIGHLIGHT_RUNTIME}
     renderArticle(articleInflight.signal)
       .then(function (data) {
         if (mine !== articleSeq || state.kind !== 'article') return;
-        try {
-          var win = frameHtml.contentWindow;
-          articleScroll = win && win.document.documentElement.dataset.design ? win.scrollY : null;
-        } catch (e) { articleScroll = null; }
+        if (patchArticlePreview(data)) return;
+        articleScroll = null;
+        if (previewDoc === state.deckId) {
+          try { articleScroll = frameHtml.contentWindow.scrollY; } catch (e) {}
+        }
+        previewDoc = state.deckId;
         var base = '<base href="' + location.origin + '/">';
         frameHtml.srcdoc = data.html.replace(/<head>/i, '<head>' + base);
       })
@@ -2924,10 +2939,35 @@ ${HIGHLIGHT_RUNTIME}
       });
   }
 
-  /** Typing re-renders the page; keep the reader where they were. */
+  /**
+   * Swaps the new text into the page already on screen, which keeps its
+   * scroll and does not reload KaTeX or Mermaid on every pause in typing.
+   * Returns false when the frame needs a full load instead: another
+   * document, another design, or math/diagrams it has no script for yet.
+   */
+  function patchArticlePreview(data) {
+    if (previewDoc !== state.deckId) return false;
+    var doc, win;
+    try { doc = frameHtml.contentDocument; win = frameHtml.contentWindow; } catch (e) { return false; }
+    if (!doc || !win || doc.readyState !== 'complete') return false;
+    if (doc.documentElement.dataset.design !== data.design) return false;
+    var main = doc.querySelector('main.article');
+    if (!main) return false;
+    var f = data.features || {};
+    if ((f.math && !win.katex) || (f.mermaid && !win.mermaid)) return false;
+    if ((f.math || f.mermaid) && !win.deckrunRenderRichContent) return false;
+    main.innerHTML = data.body;
+    doc.title = data.title;
+    if (win.deckrunRenderRichContent) win.deckrunRenderRichContent(main);
+    if (hlDoc) hlDoc.refresh();
+    return true;
+  }
+
+  /** A full reload of the same document puts the reader back where they were. */
   function restoreArticleScroll() {
     if (state.kind !== 'article' || articleScroll === null) return;
     try { frameHtml.contentWindow.scrollTo(0, articleScroll); } catch (e) {}
+    articleScroll = null;
   }
 
   function renderArticleCounts() {
@@ -3288,7 +3328,6 @@ ${HIGHLIGHT_RUNTIME}
     syncScroll();
     updateCaretUi();
     if (state.kind === 'article') {
-      articleScroll = null;
       renderArticleCounts();
       refreshArticle();
     } else {
@@ -3563,10 +3602,35 @@ ${HIGHLIGHT_RUNTIME}
   }
 
   function startNewArticle() {
-    setDesign(startDesign, true);
+    // The design rides on the new entry; openDeck applies it after the open
+    // document has been saved, so that one keeps its own design.
     var id = createDeck(uniqueName('untitled page'), D.welcomeArticle, 'article', null, null, startDesign);
     hideStartScreenSilently();
-    if (!id) { noRoom(); return; }
+    if (!id) {
+      if (state.deckId) { noRoom(); return; }
+      // Storage refuses even a first write: use the page unsaved rather than
+      // leaving the editor with nothing open, as a new deck does.
+      state.deckId = newDeckId();
+      setDocKind('article');
+      setDesign(startDesign, false);
+      src.value = D.welcomeArticle;
+      $('docname').value = 'page';
+      src.setSelectionRange(0, 0);
+      src.scrollTop = 0;
+      paint();
+      syncScroll();
+      updateCaretUi();
+      renderArticleCounts();
+      refreshArticle();
+      updateDeckCount();
+      elSave.className = 'err';
+      elSave.textContent = 'this browser blocks local storage';
+      setTimeout(function () {
+        toast('This browser will not let the editor save anything. Download your page to keep it.', 'err', 'download', download);
+      }, 700);
+      src.focus();
+      return;
+    }
     openDeck(id);
     setTimeout(function () {
       toast('Paste or write Markdown on the left. The design menu in the top bar restyles the page.');
@@ -3790,7 +3854,6 @@ ${HIGHLIGHT_RUNTIME}
       var design = chosenDesign || state.design;
       var id = createDeck(name, markdown, 'article', null, null, design);
       if (!id) { noRoom(); return; }
-      setDesign(design, true);
       hideStartScreenSilently();
       openDeck(id);
       toast('Loaded ' + file.name + ' as an HTML page');

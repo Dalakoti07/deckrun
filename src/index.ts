@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync, watch } from "fs";
+import { readFileSync, writeFileSync, statSync, watch } from "fs";
 import { readFile } from "fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { createRequire } from "module";
@@ -485,6 +485,8 @@ async function handleEditorRoute(
       markdown?: string;
       design?: string;
       title?: string;
+      /** "cdn" for a page the editor downloads; anything else stays local. */
+      assets?: string;
     };
     const markdown = body.markdown ?? "";
     if (pathname === "/__present-article" && !markdown.trim()) {
@@ -492,9 +494,12 @@ async function handleEditorRoute(
       res.end(JSON.stringify({ error: "empty document" }));
       return true;
     }
+    // Pages this server shows itself load KaTeX and Mermaid from /__vendor,
+    // so the preview, present, and PDF work offline, like a deck does.
     const article = renderArticle(markdown, {
       design: body.design,
       fallbackTitle: body.title,
+      assets: pathname === "/__article" && body.assets === "cdn" ? "cdn" : "local",
     });
     if (pathname === "/__article") {
       sendJson(res, article);
@@ -1046,8 +1051,14 @@ program
  */
 function inlineLocalImages(baseDir: string): (src: string) => string | null {
   const warned = new Set<string>();
+  const warn = (src: string, why: string) => {
+    if (warned.has(src)) return;
+    warned.add(src);
+    console.error(`${c.yellow}deckrun convert: ${why} '${src}', kept as a path${c.reset}`);
+  };
   return (src) => {
-    if (/^[a-z][a-z0-9+.-]*:/i.test(src) || src.startsWith("//") || src.startsWith("#")) {
+    // A URL scheme needs two letters or more, so a Windows drive (C:) is a path.
+    if (/^[a-z][a-z0-9+.-]+:/i.test(src) || src.startsWith("//") || src.startsWith("#")) {
       return null;
     }
     let path = src.split(/[?#]/)[0];
@@ -1056,21 +1067,36 @@ function inlineLocalImages(baseDir: string): (src: string) => string | null {
     } catch {
       // Keep the raw path; a malformed escape is still worth one try on disk.
     }
-    const target = isAbsolute(path) ? path : resolve(baseDir, path);
-    const mime = getMime(target);
-    if (!mime.startsWith("image/")) {
-      if (!warned.has(src)) console.error(`${c.yellow}deckrun convert: kept '${src}' as a path (not an image type)${c.reset}`);
-      warned.add(src);
+    if (!getMime(path).startsWith("image/")) {
+      warn(src, "not an image type:");
       return null;
     }
-    try {
-      return `data:${mime};base64,${readFileSync(target).toString("base64")}`;
-    } catch {
-      if (!warned.has(src)) console.error(`${c.yellow}deckrun convert: cannot read image '${src}', kept as a path${c.reset}`);
-      warned.add(src);
-      return null;
+    // "/img/x.png" means the Markdown's folder, as it does in the editor,
+    // which serves that folder as its root. A real absolute path still works.
+    const candidates = /^[\\/]/.test(path)
+      ? [resolve(baseDir, path.replace(/^[\\/]+/, "")), path]
+      : [resolve(baseDir, path)];
+    for (const target of candidates) {
+      try {
+        return `data:${getMime(target)};base64,${readFileSync(target).toString("base64")}`;
+      } catch {
+        // Try the next reading of the path.
+      }
     }
+    warn(src, "cannot read image");
+    return null;
   };
+}
+
+/** True when both paths name one file, through symlinks, hard links, or case. */
+function sameFile(a: string, b: string): boolean {
+  try {
+    const x = statSync(a);
+    const y = statSync(b);
+    return x.dev === y.dev && x.ino === y.ino;
+  } catch {
+    return false;
+  }
 }
 
 program
@@ -1117,7 +1143,7 @@ program
         absOut = opts.out
           ? resolve(process.cwd(), opts.out)
           : absIn!.replace(/\.(md|markdown|txt)$/i, "") + ".html";
-        if (absOut === absIn) {
+        if (absOut === absIn || sameFile(absOut, absIn!)) {
           console.error("deckrun convert: the output would overwrite the input. Pass -o to choose another path.");
           process.exitCode = 1;
           return;

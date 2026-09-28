@@ -1,12 +1,14 @@
+import { createRequire } from "module";
 import { Marked } from "marked";
-import hljs from "highlight.js/lib/common";
 import { MATH_EXTENSIONS } from "./parser.js";
 import {
   RICH_CONTENT_CSS,
   RICH_CONTENT_RUNTIME,
-  richContentFeatures,
   richContentHead,
+  type RichFeatures,
 } from "./rich-content.js";
+
+const moduleRequire = createRequire(import.meta.url);
 
 /**
  * Markdown articles: a plain `.md` file rendered as one continuous,
@@ -207,13 +209,39 @@ function escapeHtml(value: string): string {
     .replace(/"/g, "&quot;");
 }
 
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ",
+  copy: "©", reg: "®", trade: "™", hellip: "…",
+  mdash: "—", ndash: "–", lsquo: "‘", rsquo: "’",
+  ldquo: "“", rdquo: "”", laquo: "«", raquo: "»",
+  middot: "·", bull: "•", deg: "°", times: "×",
+  eacute: "é", egrave: "è", aacute: "á", agrave: "à",
+  iacute: "í", oacute: "ó", uacute: "ú", ntilde: "ñ",
+  ccedil: "ç", uuml: "ü", ouml: "ö", auml: "ä", szlig: "ß",
+};
+
+/**
+ * Plain text for the title the editor and CLI report. The page's own
+ * `<title>` keeps the heading's HTML text as-is instead, so the browser
+ * decodes every entity there, not just the ones listed here.
+ */
 function decodeEntities(value: string): string {
-  return value
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&amp;/g, "&");
+  return value.replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z][a-z0-9]*);/gi, (match, ref: string) => {
+    if (ref[0] === "#") {
+      const code = ref[1] === "x" || ref[1] === "X" ? parseInt(ref.slice(2), 16) : parseInt(ref.slice(1), 10);
+      return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : match;
+    }
+    return NAMED_ENTITIES[ref.toLowerCase()] ?? match;
+  });
+}
+
+type HighlightJs = typeof import("highlight.js").default;
+let hljsCache: HighlightJs | null = null;
+
+/** Loaded on first use, so commands that never render a page skip its cost. */
+function highlighter(): HighlightJs {
+  if (!hljsCache) hljsCache = moduleRequire("highlight.js/lib/common") as HighlightJs;
+  return hljsCache;
 }
 
 export interface ArticleOptions {
@@ -226,30 +254,50 @@ export interface ArticleOptions {
    * source as written.
    */
   resolveImage?: (src: string) => string | null;
+  /**
+   * Where KaTeX and Mermaid come from when the page needs them: the pinned
+   * CDN for a page that leaves deckrun (the default), or the copies deckrun
+   * serves itself for pages it renders locally, which then work offline.
+   */
+  assets?: "cdn" | "local";
 }
 
 export interface RenderedArticle {
   /** The complete HTML document. */
   html: string;
+  /** Just what goes inside `<main>`, for updating a page already on screen. */
+  body: string;
   /** Plain-text title, taken from the first heading. */
   title: string;
   design: ArticleDesign;
+  features: RichFeatures;
 }
 
-function markdownToHtml(markdown: string, resolveImage?: ArticleOptions["resolveImage"]): string {
+function markdownToHtml(
+  markdown: string,
+  resolveImage?: ArticleOptions["resolveImage"]
+): { body: string; features: RichFeatures } {
+  const features: RichFeatures = { math: false, mermaid: false };
   const md = new Marked({ gfm: true });
   md.use({ extensions: MATH_EXTENSIONS });
   md.use({
+    // Read off the tokens, not the output, so prose that merely mentions a
+    // class name does not pull in a script the page never uses.
+    walkTokens(token) {
+      if (token.type === "deckrunBlockMath" || token.type === "deckrunInlineMath") features.math = true;
+      else if (token.type === "code" && codeLang(token.lang) === "mermaid") features.mermaid = true;
+    },
     renderer: {
       code(code: string, infostring: string | undefined): string {
-        const lang = (infostring || "").trim().split(/\s+/)[0].toLowerCase();
+        const lang = codeLang(infostring);
         // Mermaid stays as source; the page's runtime draws it on load.
         if (lang === "mermaid") {
           return `<pre><code class="language-mermaid">${escapeHtml(code)}</code></pre>\n`;
         }
+        const hljs = lang ? highlighter() : null;
         let body: string;
         let cls = "hljs";
-        if (lang && hljs.getLanguage(lang)) {
+        if (hljs && hljs.getLanguage(lang)) {
           body = hljs.highlight(code, { language: lang, ignoreIllegals: true }).value;
           cls += ` language-${escapeHtml(lang)}`;
         } else {
@@ -259,26 +307,33 @@ function markdownToHtml(markdown: string, resolveImage?: ArticleOptions["resolve
       },
       image(href: string, title: string | null, text: string): string {
         const resolved = (resolveImage && href ? resolveImage(href) : null) ?? href;
-        const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
+        // marked has already escaped the title and alt text; only the source is raw.
+        const titleAttr = title ? ` title="${title}"` : "";
         return `<img src="${escapeHtml(resolved)}" alt="${text}"${titleAttr} loading="lazy">`;
       },
     },
   });
   const normalized = markdown.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  return md.parse(normalized) as string;
+  return { body: md.parse(normalized) as string, features };
+}
+
+function codeLang(infostring: string | undefined): string {
+  return (infostring || "").trim().split(/\s+/)[0].toLowerCase();
 }
 
 /** Renders Markdown into one complete, self-contained HTML page. */
 export function renderArticle(markdown: string, options: ArticleOptions = {}): RenderedArticle {
   const design = resolveArticleDesign(options.design);
   const spec = DESIGN_BY_ID.get(design)!;
-  const body = markdownToHtml(markdown, options.resolveImage);
+  const { body, features } = markdownToHtml(markdown, options.resolveImage);
 
+  // The heading's text, still HTML-escaped: safe to drop into <title> as is.
   const heading = body.match(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/i);
-  const headingText = heading ? decodeEntities(heading[1].replace(/<[^>]+>/g, "")).trim() : "";
-  const title = headingText || options.fallbackTitle?.trim() || "Untitled";
+  const headingHtml = heading ? heading[1].replace(/<[^>]+>/g, "").replace(/</g, "&lt;").trim() : "";
+  const fallback = options.fallbackTitle?.trim() || "Untitled";
+  const title = (headingHtml && decodeEntities(headingHtml).trim()) || fallback;
+  const titleHtml = headingHtml || escapeHtml(fallback);
 
-  const features = richContentFeatures([{ html: body }]);
   const rich = features.math || features.mermaid;
   const vars = Object.entries(spec.vars)
     .map(([k, v]) => `  ${k}: ${v};`)
@@ -291,8 +346,8 @@ export function renderArticle(markdown: string, options: ArticleOptions = {}): R
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="generator" content="deckrun">
   <meta name="color-scheme" content="${design === "dark" ? "dark" : "light"}">
-  <title>${escapeHtml(title)}</title>
-  ${rich ? richContentHead(features, "cdn") : ""}
+  <title>${titleHtml}</title>
+  ${rich ? richContentHead(features, options.assets === "local" ? "local" : "cdn") : ""}
   <style>
 :root {
 ${vars}
@@ -323,7 +378,7 @@ ${RICH_CONTENT_RUNTIME}
 </html>
 `;
 
-  return { html, title, design };
+  return { html, body, title, design, features };
 }
 
 const ARTICLE_CSS = `

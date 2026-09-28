@@ -458,16 +458,20 @@ test("The editor offers Markdown to HTML pages with the three designs", () => {
   assert.ok(editor.includes("/__present-article"));
 });
 
-test("deckrun convert writes a self-contained page and inlines local images", async () => {
-  const { mkdtempSync, writeFileSync, readFileSync, existsSync, copyFileSync } = await import("node:fs");
+test("deckrun convert writes a self-contained page and inlines local images", async (t) => {
+  const { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, copyFileSync, rmSync, symlinkSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
   const { spawnSync } = await import("node:child_process");
-  const cli = new URL("../dist/index.js", import.meta.url).pathname;
+  const cli = fileURLToPath(new URL("../dist/index.js", import.meta.url));
 
   const dir = mkdtempSync(join(tmpdir(), "deckrun-convert-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
   copyFileSync(new URL("../examples/image.png", import.meta.url), join(dir, "shot.png"));
-  writeFileSync(join(dir, "notes.md"), "# Field notes\n\n![shot](shot.png)\n\n![gone](missing.png)\n");
+  mkdirSync(join(dir, "img"));
+  copyFileSync(new URL("../examples/image.png", import.meta.url), join(dir, "img", "root.png"));
+  writeFileSync(join(dir, "notes.md"), "# Field notes\n\n![shot](shot.png)\n\n![root](/img/root.png)\n\n![gone](missing.png)\n");
 
   const ok = spawnSync(process.execPath, [cli, "convert", "notes.md", "--design", "crimson"], { cwd: dir, encoding: "utf-8" });
   assert.equal(ok.status, 0, ok.stderr);
@@ -475,7 +479,8 @@ test("deckrun convert writes a self-contained page and inlines local images", as
   const html = readFileSync(join(dir, "notes.html"), "utf-8");
   assert.match(html, /data-design="crimson"/);
   assert.match(html, /<title>Field notes<\/title>/);
-  assert.match(html, /<img src="data:image\/png;base64,/);
+  assert.match(html, /<img src="data:image\/png;base64,[^"]+" alt="shot"/);
+  assert.match(html, /<img src="data:image\/png;base64,[^"]+" alt="root"/, "/img/... resolves against the Markdown's folder");
   assert.match(html, /<img src="missing\.png"/, "an unreadable image keeps its path");
   assert.match(ok.stderr, /cannot read image 'missing\.png'/);
 
@@ -487,7 +492,35 @@ test("deckrun convert writes a self-contained page and inlines local images", as
   assert.equal(bad.status, 1);
   assert.match(bad.stderr, /unknown design 'nord'/);
 
+  // A second name for the same file must not be overwritten through.
+  symlinkSync(join(dir, "notes.md"), join(dir, "alias.md"));
+  const clobber = spawnSync(process.execPath, [cli, "convert", "alias.md", "-o", "notes.md"], { cwd: dir, encoding: "utf-8" });
+  assert.equal(clobber.status, 1);
+  assert.match(readFileSync(join(dir, "notes.md"), "utf-8"), /^# Field notes/);
+
   const list = spawnSync(process.execPath, [cli, "convert", "--list-designs"], { encoding: "utf-8" });
   assert.match(list.stdout, /^dark/m);
   assert.match(list.stdout, /^crimson/m);
+});
+
+test("Article titles, image titles, and rich-content detection read the Markdown exactly", async () => {
+  const { renderArticle } = await import("../dist/article.js");
+
+  const titled = renderArticle("# Caf&eacute; &copy; &#x2014; <b>x</b> & y");
+  assert.equal(titled.title, "Café © — x & y");
+  assert.match(titled.html, /<title>Caf&eacute; &copy; &#x2014; x &amp; y<\/title>/, "the browser decodes every entity itself");
+
+  const pic = renderArticle('![pic](a.png "Tom & Jerry")');
+  assert.match(pic.html, /title="Tom &amp; Jerry"/, "escaped once, not twice");
+
+  const prose = renderArticle("Add the `math-source` class, or a `language-mermaid` fence.");
+  assert.deepEqual(prose.features, { math: false, mermaid: false });
+  assert.ok(!/<script[^>]+src=/.test(prose.html), "mentioning a class name loads nothing");
+
+  const local = renderArticle("Math $a^2$\n\n```mermaid\ngraph TD; A-->B\n```", { assets: "local" });
+  assert.deepEqual(local.features, { math: true, mermaid: true });
+  assert.match(local.html, /src="\/__vendor\/katex\.min\.js"/);
+  assert.match(local.html, /src="\/__vendor\/mermaid\.min\.js"/);
+  assert.ok(!local.html.includes("cdn.jsdelivr.net"), "locally served pages work offline");
+  assert.ok(local.body.includes("language-mermaid") && !local.body.includes("<html"), "body is the <main> content alone");
 });

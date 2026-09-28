@@ -207,7 +207,9 @@ What "self-contained" means for the page:
 - Styles are inline, and the page uses fonts already on the reader's machine, so it needs no web fonts.
 - Code blocks are colored when the page is built, so no highlighter loads in the page.
 - KaTeX and Mermaid load from a pinned CDN, and only when the Markdown has math or a Mermaid diagram.
-- Local images referenced by path are embedded as `data:` URIs, resolved against the Markdown file's folder. Remote images stay as links. An image that cannot be read keeps its path and prints a warning.
+- Local images referenced by path are embedded as `data:` URIs, resolved against the Markdown file's folder (`/img/x.png` included, as in the editor). Remote images stay as links. An image that cannot be read keeps its path and prints a warning.
+
+`convert` refuses to write over its own input, including through a symlink or another name for the same file.
 
 An unknown design is an error, not a silent fallback.
 
@@ -301,6 +303,7 @@ page in the library.
 
 - `present` opens the page in a new tab, with no presenter chrome.
 - `export` → HTML page downloads the self-contained `.html` file. Markdown downloads the source, and PDF prints the page.
+- The preview, `present`, and PDF load KaTeX and Mermaid from deckrun's own copies, so they work offline. Only the downloaded page uses the CDN.
 - Images referenced by path show in the preview but stay as paths in an editor export, since the editor keeps Markdown and not files. Use `deckrun convert` to embed them.
 
 ### The deck library

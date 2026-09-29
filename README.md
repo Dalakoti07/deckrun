@@ -1089,6 +1089,42 @@ npm run dev
 
 `dev` runs the TypeScript through [tsx](https://tsx.is). The `"module": "NodeNext"` setting means the source imports carry `.js` extensions, and neither `ts-node --esm` nor Node's own type stripping remaps those back to the `.ts` files on Node 20 and up — tsx does. Tested on Node 18, 20, 22, and 24.
 
+### Running your local build as `deckrun`
+
+`npm run dev` only works from inside the repository. To type `deckrun` in any
+directory and have it run the code you are editing, link the package once:
+
+```bash
+npm run build
+npm link
+```
+
+`npm link` reads the `bin` field in `package.json` and creates two symlinks: a
+`deckrun` executable on your `PATH`, pointing at the global `node_modules/deckrun`
+entry, which in turn points at this repository rather than a copy of it. Confirm
+it with `which deckrun`, which should resolve into your npm prefix, and
+`deckrun --version`.
+
+The link survives rebuilds, so you never have to run `npm link` again. The
+symlink resolves to `dist/index.js`, though, so a source change is only visible
+once TypeScript has recompiled it:
+
+```bash
+npm run build       # after each change
+npx tsc --watch     # or leave this running and forget about it
+```
+
+Watch mode is safe here: `tsc` overwrites `dist/index.js` in place and preserves
+its executable bit, so the shim keeps working even though watch mode skips the
+`chmod +x` that `npm run build` performs.
+
+While the link is in place it shadows any copy installed from npm with
+`npm install -g deckrun`. To remove it and fall back to the published version:
+
+```bash
+npm unlink -g deckrun
+```
+
 The source:
 
 - `src/index.ts` is the CLI, the HTTP server, the editor routes, and port selection
